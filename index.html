@@ -632,7 +632,7 @@
 
     <div class="form-group">
       <label>URL do projeto Supabase</label>
-      <input type="text" id="sb-url" placeholder="https://xxxxxxxxxxxx.db.co">
+      <input type="text" id="sb-url" placeholder="https://xxxxxxxxxxxx.supabase.co">
     </div>
     <div class="form-group">
       <label>Chave anon (API Key pública)</label>
@@ -646,7 +646,7 @@
     <div class="setup-info">
       <p>
         <strong>Como obter as credenciais:</strong><br>
-        1. Acesse <a href="https://db.com" target="_blank">db.com</a> e crie uma conta gratuita<br>
+        1. Acesse <a href="https://supabase.com" target="_blank">supabase.com</a> e crie uma conta gratuita<br>
         2. Crie um novo projeto<br>
         3. Vá em <strong>Project Settings → API</strong><br>
         4. Copie a <strong>Project URL</strong> e a chave <strong>anon public</strong>
@@ -801,7 +801,7 @@
 
 <script>
 // ==================== CONFIG ====================
-let db = null;
+let supabase = null;
 let clientesPagina = [];
 let paginaAtual = 1;
 const POR_PAGINA = 20;
@@ -813,15 +813,24 @@ let deletarId = null;
 let geocodeCache = {};
 
 // ==================== SETUP ====================
+// Credenciais fixas — não precisa mais de tela de configuração
+const SB_URL = 'https://ouuayzzogoudpojwjiak.supabase.co';
+const SB_KEY = 'SUA_CHAVE_ANON_AQUI'; // cole a chave completa
+
 window.onload = () => {
-  const savedUrl = localStorage.getItem('sb_url');
-  const savedKey = localStorage.getItem('sb_key');
-  if (savedUrl && savedKey) {
-    document.getElementById('sb-url').value = savedUrl;
-    document.getElementById('sb-key').value = savedKey;
-    conectarSupabase(true);
-  }
+  iniciarComCredenciaisFixas();
 };
+
+async function iniciarComCredenciaisFixas() {
+  try {
+    db = window.supabase.createClient(SB_URL, SB_KEY);
+    const { error: testErr } = await db.from('clientes').select('id').limit(1);
+    if (testErr) throw testErr;
+    iniciarApp();
+  } catch (err) {
+    alert('Erro ao conectar com o banco de dados: ' + err.message);
+  }
+}
 
 async function conectarSupabase(auto = false) {
   const url = document.getElementById('sb-url').value.trim();
@@ -838,10 +847,10 @@ async function conectarSupabase(auto = false) {
   status.innerHTML = '<span class="status-loading"><span class="spinner"></span> Conectando...</span>';
 
   try {
-    db = window.supabase.createClient(url, key);
+    supabase = window.supabase.createClient(url, key);
 
     // Test connection
-    const { error: testErr } = await db.from('clientes').select('id').limit(1);
+    const { error: testErr } = await supabase.from('clientes').select('id').limit(1);
 
     if (testErr && testErr.code === '42P01') {
       // Table doesn't exist, create it
@@ -851,7 +860,7 @@ async function conectarSupabase(auto = false) {
       throw testErr;
     } else {
       // Check if empty
-      const { count } = await db.from('clientes').select('*', { count: 'exact', head: true });
+      const { count } = await supabase.from('clientes').select('*', { count: 'exact', head: true });
       if (count === 0) {
         status.innerHTML = '<span class="status-loading"><span class="spinner"></span> Importando clientes iniciais...</span>';
         await importarSeed();
@@ -890,7 +899,7 @@ async function importarSeed() {
       lat: null,
       lng: null
     }));
-    const { error } = await db.from('clientes').insert(batch);
+    const { error } = await supabase.from('clientes').insert(batch);
     if (error) throw error;
   }
 }
@@ -924,7 +933,7 @@ async function buscarCliente(q) {
   }
 
   searchTimeout = setTimeout(async () => {
-    const { data, error } = await db
+    const { data, error } = await supabase
       .from('clientes')
       .select('id, codigo, nome, endereco, bairro')
       .or(`nome.ilike.%${q}%,codigo.ilike.%${q}%`)
@@ -1069,7 +1078,7 @@ async function geocodificar(cliente) {
   if (geocodeCache[cacheKey]) return geocodeCache[cacheKey];
 
   // Check DB cache
-  const { data } = await db.from('clientes').select('lat, lng').eq('id', cliente.id).single();
+  const { data } = await supabase.from('clientes').select('lat, lng').eq('id', cliente.id).single();
   if (data && data.lat && data.lng) {
     const coords = { lat: parseFloat(data.lat), lng: parseFloat(data.lng) };
     geocodeCache[cacheKey] = coords;
@@ -1089,7 +1098,7 @@ async function geocodificar(cliente) {
     const coords = { lat: parseFloat(json[0].lat), lng: parseFloat(json[0].lon) };
     geocodeCache[cacheKey] = coords;
     // Save to DB
-    await db.from('clientes').update({ lat: coords.lat, lng: coords.lng }).eq('id', cliente.id);
+    await supabase.from('clientes').update({ lat: coords.lat, lng: coords.lng }).eq('id', cliente.id);
     return coords;
   }
   return null;
@@ -1117,7 +1126,7 @@ async function carregarClientesPaginado() {
   const tbody = document.getElementById('clientes-tbody');
   tbody.innerHTML = '<tr class="loading-row"><td colspan="6"><span class="spinner"></span> Carregando...</td></tr>';
 
-  let query = db.from('clientes').select('*', { count: 'exact' });
+  let query = supabase.from('clientes').select('*', { count: 'exact' });
   if (filtroAtual) query = query.or(`nome.ilike.%${filtroAtual}%,codigo.ilike.%${filtroAtual}%,bairro.ilike.%${filtroAtual}%`);
 
   query = query.order('nome').range((paginaAtual - 1) * POR_PAGINA, paginaAtual * POR_PAGINA - 1);
@@ -1239,9 +1248,9 @@ async function salvarCliente() {
 
   let error;
   if (id) {
-    ({ error } = await db.from('clientes').update({ ...dados, lat: null, lng: null }).eq('id', id));
+    ({ error } = await supabase.from('clientes').update({ ...dados, lat: null, lng: null }).eq('id', id));
   } else {
-    ({ error } = await db.from('clientes').insert([{ ...dados, lat: null, lng: null }]));
+    ({ error } = await supabase.from('clientes').insert([{ ...dados, lat: null, lng: null }]));
   }
 
   btn.disabled = false; btn.textContent = '💾 Salvar';
@@ -1262,7 +1271,7 @@ function confirmarDelete(id, nome) {
 
 async function confirmarExclusao() {
   if (!deletarId) return;
-  const { error } = await db.from('clientes').delete().eq('id', deletarId);
+  const { error } = await supabase.from('clientes').delete().eq('id', deletarId);
   fecharModal('modal-confirm');
   if (error) { toast('Erro ao excluir: ' + error.message, 'error'); return; }
   toast('🗑️ Cliente excluído.', 'success');
