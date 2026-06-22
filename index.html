@@ -8,7 +8,8 @@
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore-compat.js"></script>
 <style>
   :root {
     --azul: #0f2d4a;
@@ -782,24 +783,29 @@ let deletarId = null;
 let geocodeCache = {};
 
 // ==================== SETUP ====================
-const SB_URL = 'https://ouuayzzogoudpojwjiak.supabase.co';
-const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im91dWF5enpvZ291ZHBvandqaWFrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgyNjUzNTksImV4cCI6MjA5Mzg0MTM1OX0._fUnqJTdZXWDK7ixY1GKrxC99BtgowU98HHpRTlH4Q0';
-
-window.onload = () => {
-  iniciarComCredenciaisFixas();
+const firebaseConfig = {
+  apiKey: "AIzaSyB9sc95VzxmZQf1B9ZDg6UDerpOTuwV8W8",
+  authDomain: "rota-facil-central.firebaseapp.com",
+  projectId: "rota-facil-central",
+  storageBucket: "rota-facil-central.firebasestorage.app",
+  messagingSenderId: "893525397382",
+  appId: "1:893525397382:web:a95ae7c1c84fe82f8be607"
 };
 
-async function iniciarComCredenciaisFixas() {
+let todosClientes = []; // cache local de todos os clientes (carregado uma vez)
+
+window.onload = () => {
+  iniciarFirebase();
+};
+
+async function iniciarFirebase() {
   try {
-    db = window.supabase.createClient(SB_URL, SB_KEY);
-    const { error: testErr } = await db.from('clientes').select('id').limit(1);
-    if (testErr && testErr.code === '42P01') {
-      await criarTabelaEImportar();
-    } else if (testErr) {
-      throw testErr;
-    } else {
-      const { count } = await db.from('clientes').select('*', { count: 'exact', head: true });
-      if (count === 0) await importarSeed();
+    firebase.initializeApp(firebaseConfig);
+    db = firebase.firestore();
+    await carregarTodosClientes();
+    if (todosClientes.length === 0) {
+      await importarSeed();
+      await carregarTodosClientes();
     }
     iniciarApp();
   } catch (err) {
@@ -808,27 +814,30 @@ async function iniciarComCredenciaisFixas() {
   }
 }
 
-async function criarTabelaEImportar() {
-  // Try to create table via RPC or just try inserting
-  // Supabase anon key can't create tables via SQL — user must create manually
-  // Show instructions
-  throw new Error('Tabela não encontrada. Crie a tabela "clientes" no Supabase conforme as instruções do arquivo README.');
+async function carregarTodosClientes() {
+  const snap = await db.collection('clientes').get();
+  todosClientes = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  todosClientes.sort((a, b) => (a.nome || '').localeCompare(b.nome || ''));
 }
 
 async function importarSeed() {
-  const BATCH = 100;
+  const BATCH = 400; // limite do Firestore é 500 operações por lote
   for (let i = 0; i < CLIENTES_SEED.length; i += BATCH) {
-    const batch = CLIENTES_SEED.slice(i, i + BATCH).map(c => ({
-      codigo: c.codigo,
-      nome: c.nome,
-      endereco: c.endereco,
-      bairro: c.bairro,
-      cep: c.cep,
-      lat: null,
-      lng: null
-    }));
-    const { error } = await db.from('clientes').insert(batch);
-    if (error) throw error;
+    const batch = db.batch();
+    const chunk = CLIENTES_SEED.slice(i, i + BATCH);
+    chunk.forEach(c => {
+      const ref = db.collection('clientes').doc();
+      batch.set(ref, {
+        codigo: c.codigo,
+        nome: c.nome,
+        endereco: c.endereco,
+        bairro: c.bairro,
+        cep: c.cep,
+        lat: null,
+        lng: null
+      });
+    });
+    await batch.commit();
   }
 }
 
@@ -860,14 +869,12 @@ async function buscarCliente(q) {
     return;
   }
 
-  searchTimeout = setTimeout(async () => {
-    const { data, error } = await db
-      .from('clientes')
-      .select('id, codigo, nome, endereco, bairro')
-      .or(`nome.ilike.%${q}%,codigo.ilike.%${q}%`)
-      .limit(10);
-
-    if (error || !data) return;
+  searchTimeout = setTimeout(() => {
+    const term = q.toLowerCase();
+    const data = todosClientes.filter(c =>
+      (c.nome && c.nome.toLowerCase().includes(term)) ||
+      (c.codigo && c.codigo.toLowerCase().includes(term))
+    ).slice(0, 10);
 
     if (data.length === 0) {
       results.innerHTML = '<div class="search-result-item"><div class="res-nome" style="color:#aaa">Nenhum resultado encontrado</div></div>';
@@ -1005,10 +1012,10 @@ async function geocodificar(cliente) {
   const cacheKey = cliente.id;
   if (geocodeCache[cacheKey]) return geocodeCache[cacheKey];
 
-  // Check DB cache
-  const { data } = await db.from('clientes').select('lat, lng').eq('id', cliente.id).single();
-  if (data && data.lat && data.lng) {
-    const coords = { lat: parseFloat(data.lat), lng: parseFloat(data.lng) };
+  // Check local cache / cache local de clientes
+  const local = todosClientes.find(c => c.id === cliente.id);
+  if (local && local.lat && local.lng) {
+    const coords = { lat: parseFloat(local.lat), lng: parseFloat(local.lng) };
     geocodeCache[cacheKey] = coords;
     return coords;
   }
@@ -1025,8 +1032,9 @@ async function geocodificar(cliente) {
   if (json.length > 0) {
     const coords = { lat: parseFloat(json[0].lat), lng: parseFloat(json[0].lon) };
     geocodeCache[cacheKey] = coords;
-    // Save to DB
-    await db.from('clientes').update({ lat: coords.lat, lng: coords.lng }).eq('id', cliente.id);
+    // Save to Firestore e ao cache local
+    await db.collection('clientes').doc(cliente.id).update({ lat: coords.lat, lng: coords.lng });
+    if (local) { local.lat = coords.lat; local.lng = coords.lng; }
     return coords;
   }
   return null;
@@ -1050,21 +1058,23 @@ function resetMapa() {
 }
 
 // ==================== CLIENTES CRUD ====================
-async function carregarClientesPaginado() {
+function carregarClientesPaginado() {
   const tbody = document.getElementById('clientes-tbody');
-  tbody.innerHTML = '<tr class="loading-row"><td colspan="6"><span class="spinner"></span> Carregando...</td></tr>';
 
-  let query = db.from('clientes').select('*', { count: 'exact' });
-  if (filtroAtual) query = query.or(`nome.ilike.%${filtroAtual}%,codigo.ilike.%${filtroAtual}%,bairro.ilike.%${filtroAtual}%`);
-
-  query = query.order('nome').range((paginaAtual - 1) * POR_PAGINA, paginaAtual * POR_PAGINA - 1);
-
-  const { data, count, error } = await query;
-
-  if (error) {
-    tbody.innerHTML = `<tr class="loading-row"><td colspan="6" style="color:var(--vermelho)">Erro ao carregar: ${error.message}</td></tr>`;
-    return;
+  let filtrados = todosClientes;
+  if (filtroAtual) {
+    const term = filtroAtual.toLowerCase();
+    filtrados = todosClientes.filter(c =>
+      (c.nome && c.nome.toLowerCase().includes(term)) ||
+      (c.codigo && c.codigo.toLowerCase().includes(term)) ||
+      (c.bairro && c.bairro.toLowerCase().includes(term))
+    );
   }
+  filtrados = [...filtrados].sort((a, b) => (a.nome || '').localeCompare(b.nome || ''));
+
+  const count = filtrados.length;
+  const start = (paginaAtual - 1) * POR_PAGINA;
+  const data = filtrados.slice(start, start + POR_PAGINA);
 
   totalClientes = count;
   clientesPagina = data;
@@ -1174,16 +1184,22 @@ async function salvarCliente() {
   const btn = document.getElementById('btn-salvar');
   btn.disabled = true; btn.textContent = 'Salvando...';
 
-  let error;
-  if (id) {
-    ({ error } = await db.from('clientes').update({ ...dados, lat: null, lng: null }).eq('id', id));
-  } else {
-    ({ error } = await db.from('clientes').insert([{ ...dados, lat: null, lng: null }]));
+  try {
+    if (id) {
+      await db.collection('clientes').doc(id).update({ ...dados, lat: null, lng: null });
+      const idx = todosClientes.findIndex(c => c.id === id);
+      if (idx >= 0) todosClientes[idx] = { ...todosClientes[idx], ...dados, lat: null, lng: null };
+    } else {
+      const ref = await db.collection('clientes').add({ ...dados, lat: null, lng: null });
+      todosClientes.push({ id: ref.id, ...dados, lat: null, lng: null });
+    }
+  } catch (err) {
+    btn.disabled = false; btn.textContent = '💾 Salvar';
+    toast('Erro ao salvar: ' + err.message, 'error');
+    return;
   }
 
   btn.disabled = false; btn.textContent = '💾 Salvar';
-
-  if (error) { toast('Erro ao salvar: ' + error.message, 'error'); return; }
 
   fecharModal('modal-form');
   toast(id ? '✅ Cliente atualizado!' : '✅ Cliente adicionado!', 'success');
@@ -1199,9 +1215,15 @@ function confirmarDelete(id, nome) {
 
 async function confirmarExclusao() {
   if (!deletarId) return;
-  const { error } = await db.from('clientes').delete().eq('id', deletarId);
+  try {
+    await db.collection('clientes').doc(deletarId).delete();
+    todosClientes = todosClientes.filter(c => c.id !== deletarId);
+  } catch (err) {
+    fecharModal('modal-confirm');
+    toast('Erro ao excluir: ' + err.message, 'error');
+    return;
+  }
   fecharModal('modal-confirm');
-  if (error) { toast('Erro ao excluir: ' + error.message, 'error'); return; }
   toast('🗑️ Cliente excluído.', 'success');
   deletarId = null;
   carregarClientesPaginado();
